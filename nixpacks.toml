@@ -1,5 +1,1 @@
-[phases.setup]
-nixPkgs = ["python312", "gcc"]
-
-[start]
-cmd = "python bot.py"
+# removed - using Dockerfile
