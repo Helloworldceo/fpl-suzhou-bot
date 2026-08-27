@@ -1,6 +1,5 @@
 import os
 import json
-import asyncio
 from datetime import datetime, timezone
 from collections import defaultdict
 
@@ -8,13 +7,12 @@ import aiohttp
 import discord
 from discord import app_commands
 from discord.ext import commands, tasks
-from dotenv import load_dotenv
 
-load_dotenv()
-
-TOKEN = os.getenv("DISCORD_TOKEN")
-LEAGUE_ID = int(os.getenv("LEAGUE_ID", "1211030"))
-ANNOUNCE_CHANNEL_ID = int(os.getenv("ANNOUNCE_CHANNEL_ID", "0"))
+# ========== HARDCODED CONFIG ==========
+TOKEN = "MTU0MjQ5NTA2OTY5NTY0MzcyOQ.GcOPja.q8vRcrIhhI6xAw1Bd03rgcgYmizTK0HlZnLMFI"
+LEAGUE_ID = 1211030
+ANNOUNCE_CHANNEL_ID = 1541831393620004946
+# ======================================
 
 DATA_FILE = "bot_data.json"
 FPL_BASE = "https://fantasy.premierleague.com/api"
@@ -255,7 +253,5 @@ async def on_ready():
         check_new_gameweek.start()
 
 if __name__ == "__main__":
-    if not TOKEN:
-        print("ERROR: DISCORD_TOKEN not set")
-        exit(1)
+    print("Starting FPL bot...")
     bot.run(TOKEN)
