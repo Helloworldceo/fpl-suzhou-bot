@@ -14,6 +14,13 @@ LEAGUE_ID = 1211030
 ANNOUNCE_CHANNEL_ID = 1541831393620004946
 # ======================================
 
+# Prize rules
+WEEKLY_PRIZE = 10          # ¥ per GW high score
+SEASON_1ST = 350           # ¥
+SEASON_2ND = 100           # ¥
+CUP_WINNER = 170           # ¥
+TOTAL_POT = 1000           # ¥
+
 DATA_FILE = "bot_data.json"
 FPL_BASE = "https://fantasy.premierleague.com/api"
 
@@ -48,7 +55,6 @@ async def get_entry_history(session, entry_id):
     return await fetch_json(session, f"{FPL_BASE}/entry/{entry_id}/history/")
 
 async def get_managers(session):
-    """Return list of {entry, name, player_name}"""
     data = await get_league_standings(session)
     results = data["standings"]["results"]
     managers = []
@@ -56,12 +62,14 @@ async def get_managers(session):
         managers.append({
             "entry": r["entry"],
             "name": r["entry_name"],
-            "player_name": r["player_name"]
+            "player_name": r["player_name"],
+            "total": r["total"],
+            "rank": r["rank"],
+            "event_total": r["event_total"]
         })
     return managers
 
 async def get_gw_scores(session, gw: int):
-    """Returns list of (name, player_name, points) sorted by points desc + high score value"""
     managers = await get_managers(session)
     scores = []
     for m in managers:
@@ -72,13 +80,17 @@ async def get_gw_scores(session, gw: int):
                 points = e["points"]
                 break
         scores.append((m["name"], m["player_name"], points))
-    
     scores.sort(key=lambda x: x[2], reverse=True)
     high = scores[0][2] if scores else 0
     return scores, high
 
-async def get_high_scorer_counts(session):
-    """Returns dict name -> number of weeks they had the highest score"""
+async def get_high_scorer_details(session):
+    """
+    Returns:
+      wins: dict name -> count
+      weeks_won: dict name -> list of GW numbers
+      week_winners: list of (gw, [names], high_pts)
+    """
     managers = await get_managers(session)
     all_hist = {}
     for m in managers:
@@ -86,7 +98,7 @@ async def get_high_scorer_counts(session):
         all_hist[m["name"]] = {e["event"]: e["points"] for e in hist.get("current", [])}
 
     if not all_hist:
-        return {}
+        return {}, {}, []
 
     max_gw = 0
     for h in all_hist.values():
@@ -94,6 +106,9 @@ async def get_high_scorer_counts(session):
             max_gw = max(max_gw, max(h.keys()))
 
     wins = defaultdict(int)
+    weeks_won = defaultdict(list)
+    week_winners = []
+
     for gw in range(1, max_gw + 1):
         gw_scores = []
         for name, history in all_hist.items():
@@ -102,12 +117,36 @@ async def get_high_scorer_counts(session):
         if not gw_scores:
             continue
         high = max(s[1] for s in gw_scores)
-        for name, pts in gw_scores:
-            if pts == high and high > 0:
-                wins[name] += 1
-    return dict(wins)
+        if high <= 0:
+            continue
+        winners = [name for name, pts in gw_scores if pts == high]
+        for name in winners:
+            wins[name] += 1
+            weeks_won[name].append(gw)
+        week_winners.append((gw, winners, high))
+
+    return dict(wins), dict(weeks_won), week_winners
 
 # ---------- slash commands ----------
+@tree.command(name="rules", description="Prize pot and league rules")
+async def rules(interaction: discord.Interaction):
+    embed = discord.Embed(
+        title="💰 FPL_Suzhou_Seoul Prize Rules",
+        color=0x00c853,
+        timestamp=datetime.now(timezone.utc)
+    )
+    embed.description = (
+        f"**Total Pot: {TOTAL_POT}¥**\n\n"
+        f"• **Weekly High Scorer** → **{WEEKLY_PRIZE}¥** each Gameweek\n"
+        f"  (38 GWs × {WEEKLY_PRIZE}¥ = **380¥** total)\n\n"
+        f"• **Season 1st place** (highest total points) → **{SEASON_1ST}¥**\n"
+        f"• **Season 2nd place** → **{SEASON_2ND}¥**\n"
+        f"• **Cup Winner** → **{CUP_WINNER}¥**\n\n"
+        f"380 + 350 + 100 + 170 = **1000¥**"
+    )
+    embed.set_footer(text="May the best manager win ⚽")
+    await interaction.response.send_message(embed=embed)
+
 @tree.command(name="standings", description="Current league standings")
 async def standings(interaction: discord.Interaction):
     await interaction.response.defer()
@@ -123,8 +162,9 @@ async def standings(interaction: discord.Interaction):
         )
         lines = []
         for r in results:
+            medal = "🥇" if r["rank"] == 1 else "🥈" if r["rank"] == 2 else "🥉" if r["rank"] == 3 else f"**{r['rank']}.**"
             lines.append(
-                f"**{r['rank']}.** {r['entry_name']} ({r['player_name']}) — "
+                f"{medal} {r['entry_name']} ({r['player_name']}) — "
                 f"**{r['total']}** pts  |  GW: {r['event_total']}"
             )
         embed.description = "\n".join(lines)
@@ -160,30 +200,119 @@ async def gw_command(interaction: discord.Interaction, gameweek: int = None):
 
         winners = [s[0] for s in scores if s[2] == high and high > 0]
         if winners:
-            embed.set_footer(text=f"High scorer(s): {', '.join(winners)} ({high} pts)")
+            embed.set_footer(text=f"High scorer(s): {', '.join(winners)} ({high} pts) → +{WEEKLY_PRIZE}¥")
 
         await interaction.followup.send(embed=embed)
 
-@tree.command(name="highscorers", description="How many times each friend has been the weekly high scorer")
+@tree.command(name="highscorers", description="Weekly high scorers – who won which weeks + money earned")
 async def highscorers(interaction: discord.Interaction):
     await interaction.response.defer()
     async with aiohttp.ClientSession() as session:
-        wins = await get_high_scorer_counts(session)
+        wins, weeks_won, week_winners = await get_high_scorer_details(session)
         if not wins:
-            await interaction.followup.send("No data yet.")
+            await interaction.followup.send("No finished gameweeks yet.")
             return
 
         sorted_wins = sorted(wins.items(), key=lambda x: x[1], reverse=True)
+
         embed = discord.Embed(
             title="👑 Weekly High Scorer Leaderboard",
             color=0xffd700,
             timestamp=datetime.now(timezone.utc)
         )
+
         lines = []
         for i, (name, count) in enumerate(sorted_wins, 1):
             medal = "🥇" if i == 1 else "🥈" if i == 2 else "🥉" if i == 3 else "•"
-            lines.append(f"{medal} **{name}** — {count} time{'s' if count != 1 else ''}")
+            money = count * WEEKLY_PRIZE
+            gws = ", ".join(f"GW{g}" for g in weeks_won.get(name, []))
+            lines.append(
+                f"{medal} **{name}** — **{count}** win{'s' if count != 1 else ''} "
+                f"({money}¥)\n    └ Weeks: {gws}"
+            )
         embed.description = "\n".join(lines)
+
+        # Full week-by-week list
+        if week_winners:
+            history = "\n".join(
+                f"**GW{gw}**: {', '.join(w)} ({pts} pts)"
+                for gw, w, pts in week_winners
+            )
+            embed.add_field(name="Week-by-week winners", value=history, inline=False)
+
+        await interaction.followup.send(embed=embed)
+
+@tree.command(name="money", description="Current prize money earned + projected season prizes")
+async def money(interaction: discord.Interaction):
+    await interaction.response.defer()
+    async with aiohttp.ClientSession() as session:
+        wins, weeks_won, _ = await get_high_scorer_details(session)
+        managers = await get_managers(session)
+
+        embed = discord.Embed(
+            title="💵 Current Prize Money Tracker",
+            color=0x00bcd4,
+            timestamp=datetime.now(timezone.utc)
+        )
+
+        # Weekly money so far
+        weekly_lines = []
+        total_weekly_paid = 0
+        for name, count in sorted(wins.items(), key=lambda x: x[1], reverse=True):
+            yen = count * WEEKLY_PRIZE
+            total_weekly_paid += yen
+            weekly_lines.append(f"**{name}**: {count} × {WEEKLY_PRIZE}¥ = **{yen}¥**")
+
+        if weekly_lines:
+            embed.add_field(
+                name=f"Weekly High Scorer Money (so far)",
+                value="\n".join(weekly_lines) or "None yet",
+                inline=False
+            )
+        else:
+            embed.add_field(name="Weekly High Scorer Money", value="No weeks finished yet", inline=False)
+
+        # Projected season prizes based on current standings
+        if managers:
+            sorted_m = sorted(managers, key=lambda m: m["total"], reverse=True)
+            first = sorted_m[0]["name"] if len(sorted_m) > 0 else "—"
+            second = sorted_m[1]["name"] if len(sorted_m) > 1 else "—"
+
+            season_text = (
+                f"🥇 **1st** ({SEASON_1ST}¥): **{first}**\n"
+                f"🥈 **2nd** ({SEASON_2ND}¥): **{second}**\n"
+                f"🏆 Cup Winner ({CUP_WINNER}¥): *TBD*"
+            )
+            embed.add_field(name="Projected Season Prizes (current standings)", value=season_text, inline=False)
+
+        remaining_weekly = (38 * WEEKLY_PRIZE) - total_weekly_paid
+        embed.set_footer(text=f"Weekly pot remaining: ~{remaining_weekly}¥ | Total pot: {TOTAL_POT}¥")
+
+        await interaction.followup.send(embed=embed)
+
+@tree.command(name="topscore", description="Highest single gameweek score of the season so far")
+async def topscore(interaction: discord.Interaction):
+    await interaction.response.defer()
+    async with aiohttp.ClientSession() as session:
+        managers = await get_managers(session)
+        best = (None, 0, 0)  # name, points, gw
+
+        for m in managers:
+            hist = await get_entry_history(session, m["entry"])
+            for e in hist.get("current", []):
+                if e["points"] > best[1]:
+                    best = (m["name"], e["points"], e["event"])
+
+        if best[0] is None:
+            await interaction.followup.send("No scores yet.")
+            return
+
+        embed = discord.Embed(
+            title="🚀 Highest Single GW Score",
+            description=f"**{best[0]}** scored **{best[1]}** points in **GW{best[2]}**!",
+            color=0xff5722,
+            timestamp=datetime.now(timezone.utc)
+        )
         await interaction.followup.send(embed=embed)
 
 # ---------- auto announcement ----------
@@ -223,13 +352,16 @@ async def check_new_gameweek():
             if winners:
                 embed.add_field(
                     name="Weekly High Scorer",
-                    value=f"🎉 **{', '.join(winners)}** with **{high}** points!",
+                    value=f"🎉 **{', '.join(winners)}** with **{high}** points!\n💰 **+{WEEKLY_PRIZE}¥** each",
                     inline=False
                 )
 
-            wins = await get_high_scorer_counts(session)
+            wins, weeks_won, _ = await get_high_scorer_details(session)
             sorted_wins = sorted(wins.items(), key=lambda x: x[1], reverse=True)
-            table = "\n".join(f"**{n}**: {c}" for n, c in sorted_wins)
+            table = "\n".join(
+                f"**{n}**: {c} win{'s' if c != 1 else ''} ({c * WEEKLY_PRIZE}¥)"
+                for n, c in sorted_wins
+            )
             embed.add_field(name="Season High Scorer Count", value=table or "—", inline=False)
 
             await channel.send(embed=embed)
