@@ -12,14 +12,15 @@ from discord.ext import commands, tasks
 TOKEN = "MTU0MjQ5NTA2OTY5NTY0MzcyOQ.GcOPja.q8vRcrIhhI6xAw1Bd03rgcgYmizTK0HlZnLMFI"
 LEAGUE_ID = 1211030
 ANNOUNCE_CHANNEL_ID = 1541831393620004946
+GUILD_ID = 1541831392910901390  # your Discord server
 # ======================================
 
 # Prize rules
-WEEKLY_PRIZE = 10          # ¥ per GW high score
-SEASON_1ST = 350           # ¥
-SEASON_2ND = 100           # ¥
-CUP_WINNER = 170           # ¥
-TOTAL_POT = 1000           # ¥
+WEEKLY_PRIZE = 10
+SEASON_1ST = 350
+SEASON_2ND = 100
+CUP_WINNER = 170
+TOTAL_POT = 1000
 
 DATA_FILE = "bot_data.json"
 FPL_BASE = "https://fantasy.premierleague.com/api"
@@ -28,7 +29,6 @@ intents = discord.Intents.default()
 bot = commands.Bot(command_prefix="!", intents=intents)
 tree = bot.tree
 
-# ---------- helpers ----------
 def load_data():
     if os.path.exists(DATA_FILE):
         with open(DATA_FILE, "r") as f:
@@ -85,12 +85,6 @@ async def get_gw_scores(session, gw: int):
     return scores, high
 
 async def get_high_scorer_details(session):
-    """
-    Returns:
-      wins: dict name -> count
-      weeks_won: dict name -> list of GW numbers
-      week_winners: list of (gw, [names], high_pts)
-    """
     managers = await get_managers(session)
     all_hist = {}
     for m in managers:
@@ -127,7 +121,6 @@ async def get_high_scorer_details(session):
 
     return dict(wins), dict(weeks_won), week_winners
 
-# ---------- slash commands ----------
 @tree.command(name="rules", description="Prize pot and league rules")
 async def rules(interaction: discord.Interaction):
     embed = discord.Embed(
@@ -232,7 +225,6 @@ async def highscorers(interaction: discord.Interaction):
             )
         embed.description = "\n".join(lines)
 
-        # Full week-by-week list
         if week_winners:
             history = "\n".join(
                 f"**GW{gw}**: {', '.join(w)} ({pts} pts)"
@@ -255,7 +247,6 @@ async def money(interaction: discord.Interaction):
             timestamp=datetime.now(timezone.utc)
         )
 
-        # Weekly money so far
         weekly_lines = []
         total_weekly_paid = 0
         for name, count in sorted(wins.items(), key=lambda x: x[1], reverse=True):
@@ -265,14 +256,13 @@ async def money(interaction: discord.Interaction):
 
         if weekly_lines:
             embed.add_field(
-                name=f"Weekly High Scorer Money (so far)",
-                value="\n".join(weekly_lines) or "None yet",
+                name="Weekly High Scorer Money (so far)",
+                value="\n".join(weekly_lines),
                 inline=False
             )
         else:
             embed.add_field(name="Weekly High Scorer Money", value="No weeks finished yet", inline=False)
 
-        # Projected season prizes based on current standings
         if managers:
             sorted_m = sorted(managers, key=lambda m: m["total"], reverse=True)
             first = sorted_m[0]["name"] if len(sorted_m) > 0 else "—"
@@ -295,7 +285,7 @@ async def topscore(interaction: discord.Interaction):
     await interaction.response.defer()
     async with aiohttp.ClientSession() as session:
         managers = await get_managers(session)
-        best = (None, 0, 0)  # name, points, gw
+        best = (None, 0, 0)
 
         for m in managers:
             hist = await get_entry_history(session, m["entry"])
@@ -315,7 +305,6 @@ async def topscore(interaction: discord.Interaction):
         )
         await interaction.followup.send(embed=embed)
 
-# ---------- auto announcement ----------
 @tasks.loop(minutes=30)
 async def check_new_gameweek():
     if ANNOUNCE_CHANNEL_ID == 0:
@@ -377,10 +366,18 @@ async def before_check():
 async def on_ready():
     print(f"Logged in as {bot.user} (ID: {bot.user.id})")
     try:
-        synced = await tree.sync()
-        print(f"Synced {len(synced)} command(s)")
+        # Force instant sync to your server
+        guild = discord.Object(id=GUILD_ID)
+        tree.copy_global_to(guild=guild)
+        synced = await tree.sync(guild=guild)
+        print(f"Synced {len(synced)} command(s) to guild {GUILD_ID}")
     except Exception as e:
         print(f"Sync error: {e}")
+        try:
+            synced = await tree.sync()
+            print(f"Global sync: {len(synced)} command(s)")
+        except Exception as e2:
+            print(f"Global sync also failed: {e2}")
     if not check_new_gameweek.is_running():
         check_new_gameweek.start()
 
