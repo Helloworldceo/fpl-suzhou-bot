@@ -25,7 +25,7 @@ DATA_FILE = "bot_data.json"
 FPL_BASE = "https://fantasy.premierleague.com/api"
 
 intents = discord.Intents.default()
-intents.message_content = True  # needed for ! commands
+intents.message_content = True
 bot = commands.Bot(command_prefix="!", intents=intents)
 tree = bot.tree
 
@@ -47,6 +47,11 @@ async def fetch_json(session, url):
 
 async def get_bootstrap(session):
     return await fetch_json(session, f"{FPL_BASE}/bootstrap-static/")
+
+async def get_finished_gw_ids(session):
+    """Only gameweeks that FPL has marked as finished."""
+    bootstrap = await get_bootstrap(session)
+    return sorted(e["id"] for e in bootstrap["events"] if e.get("finished"))
 
 async def get_league_standings(session):
     return await fetch_json(session, f"{FPL_BASE}/leagues-classic/{LEAGUE_ID}/standings/")
@@ -82,25 +87,23 @@ async def get_gw_scores(session, gw: int):
     return scores, high
 
 async def get_high_scorer_details(session):
+    """Only counts FINISHED gameweeks."""
     managers = await get_managers(session)
+    finished_gws = await get_finished_gw_ids(session)
+
     all_hist = {}
     for m in managers:
         hist = await get_entry_history(session, m["entry"])
         all_hist[m["name"]] = {e["event"]: e["points"] for e in hist.get("current", [])}
 
-    if not all_hist:
+    if not all_hist or not finished_gws:
         return {}, {}, []
-
-    max_gw = 0
-    for h in all_hist.values():
-        if h:
-            max_gw = max(max_gw, max(h.keys()))
 
     wins = defaultdict(int)
     weeks_won = defaultdict(list)
     week_winners = []
 
-    for gw in range(1, max_gw + 1):
+    for gw in finished_gws:
         gw_scores = [(name, history.get(gw, 0)) for name, history in all_hist.items()]
         if not gw_scores:
             continue
@@ -240,15 +243,18 @@ async def slash_money(interaction: discord.Interaction):
 async def slash_topscore(interaction: discord.Interaction):
     await interaction.response.defer()
     async with aiohttp.ClientSession() as session:
+        finished_gws = await get_finished_gw_ids(session)
         managers = await get_managers(session)
         best = (None, 0, 0)
         for m in managers:
             hist = await get_entry_history(session, m["entry"])
             for e in hist.get("current", []):
+                if e["event"] not in finished_gws:
+                    continue
                 if e["points"] > best[1]:
                     best = (m["name"], e["points"], e["event"])
         if best[0] is None:
-            await interaction.followup.send("No scores yet.")
+            await interaction.followup.send("No finished scores yet.")
             return
         embed = discord.Embed(
             title="🚀 Highest Single GW Score",
@@ -258,7 +264,7 @@ async def slash_topscore(interaction: discord.Interaction):
         )
         await interaction.followup.send(embed=embed)
 
-# ========== PREFIX COMMANDS (work immediately) ==========
+# ========== PREFIX COMMANDS ==========
 @bot.command(name="rules")
 async def prefix_rules(ctx):
     await ctx.send(embed=await make_rules_embed())
@@ -301,15 +307,18 @@ async def prefix_gw(ctx, gameweek: int = None):
 @bot.command(name="topscore")
 async def prefix_topscore(ctx):
     async with aiohttp.ClientSession() as session:
+        finished_gws = await get_finished_gw_ids(session)
         managers = await get_managers(session)
         best = (None, 0, 0)
         for m in managers:
             hist = await get_entry_history(session, m["entry"])
             for e in hist.get("current", []):
+                if e["event"] not in finished_gws:
+                    continue
                 if e["points"] > best[1]:
                     best = (m["name"], e["points"], e["event"])
         if best[0] is None:
-            await ctx.send("No scores yet.")
+            await ctx.send("No finished scores yet.")
             return
         embed = discord.Embed(
             title="🚀 Highest Single GW Score",
@@ -322,13 +331,12 @@ async def prefix_topscore(ctx):
 async def prefix_help(ctx):
     await ctx.send(
         "**FPL Bot Commands**\n"
-        "`!rules` – Prize rules\n"
+        "`!rules` / `/rules` – Prize rules\n"
         "`!standings` – League table\n"
         "`!gw [number]` – Gameweek scores\n"
         "`!highscorers` – Weekly winners + money\n"
         "`!money` – Prize money tracker\n"
-        "`!topscore` – Highest GW score\n"
-        "(Slash commands `/rules` etc. also available)"
+        "`!topscore` – Highest GW score"
     )
 
 # ========== AUTO ANNOUNCEMENT ==========
@@ -340,11 +348,10 @@ async def check_new_gameweek():
     data = load_data()
     last = data.get("last_announced_gw", 0)
     async with aiohttp.ClientSession() as session:
-        bootstrap = await get_bootstrap(session)
-        finished = [e for e in bootstrap["events"] if e["finished"]]
-        if not finished:
+        finished_gws = await get_finished_gw_ids(session)
+        if not finished_gws:
             return
-        latest = finished[-1]["id"]
+        latest = finished_gws[-1]
         if latest > last:
             scores, high = await get_gw_scores(session, latest)
             winners = [s[0] for s in scores if s[2] == high and high > 0]
@@ -352,9 +359,13 @@ async def check_new_gameweek():
             lines = [f"{'🥇 ' if pts == high else ''}**{name}** — **{pts}** pts" for name, player, pts in scores]
             embed.description = "\n".join(lines)
             if winners:
-                embed.add_field(name="Weekly High Scorer", value=f"🎉 **{', '.join(winners)}** ({high} pts)\n💰 **+{WEEKLY_PRIZE}¥**", inline=False)
+                embed.add_field(
+                    name="Weekly High Scorer",
+                    value=f"🎉 **{', '.join(winners)}** ({high} pts)\n💰 **+{WEEKLY_PRIZE}¥** each",
+                    inline=False
+                )
             wins, _, _ = await get_high_scorer_details(session)
-            table = "\n".join(f"**{n}**: {c} ({c * WEEKLY_PRIZE}¥)" for n, c in sorted(wins.items(), key=lambda x: -x[1]))
+            table = "\n".join(f"**{n}**: {c} win{'s' if c != 1 else ''} ({c * WEEKLY_PRIZE}¥)" for n, c in sorted(wins.items(), key=lambda x: -x[1]))
             embed.add_field(name="Season High Scorer Count", value=table or "—", inline=False)
             await channel.send(embed=embed)
             data["last_announced_gw"] = latest
