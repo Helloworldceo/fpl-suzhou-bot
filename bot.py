@@ -135,7 +135,6 @@ async def get_high_scorer_details(session):
     return dict(wins), dict(weeks_won), week_winners
 
 async def get_form_data(session, last_n=5):
-    """Points from the last N gameweeks (including live)."""
     managers = await get_managers(session)
     rows = []
     for m in managers:
@@ -195,21 +194,21 @@ async def make_help_embed():
         timestamp=datetime.now(timezone.utc)
     )
     embed.description = (
-        "Use `/` slash commands or `!` prefix commands.\n\n"
+        "Use `!` commands (most reliable) or `/` slash commands.\n\n"
         "**League & scores**\n"
-        "`/standings` or `!standings` – Current league table\n"
-        "`/gw [n]` or `!gw [n]` – Scores for a gameweek (default = current)\n"
-        "`/live` or `!live` – Live scores for the current gameweek\n"
-        "`/form` or `!form` – Form table (last 5 gameweeks)\n\n"
+        "`!standings` – Current league table\n"
+        "`!gw [n]` – Scores for a gameweek (default = current)\n"
+        "`!live` – Live scores for the current gameweek\n"
+        "`!form` – Form table (last 5 gameweeks)\n\n"
         "**High scorers & money**\n"
-        "`/highscorers` or `!highscorers` – Who won which weeks + count + ¥\n"
-        "`/money` or `!money` – Prize money (confirmed vs live)\n"
-        "`/topscore` or `!topscore` – Highest single GW score\n"
-        "`/rules` or `!rules` – Prize pot rules (1000¥)\n\n"
+        "`!highscorers` – Who won which weeks + count + ¥\n"
+        "`!money` – Prize money (confirmed vs live)\n"
+        "`!topscore` – Highest single GW score\n"
+        "`!rules` – Prize pot rules (1000¥)\n\n"
         "**Team info**\n"
-        "`/chips` or `!chips` – Chip usage (Wildcard, BB, TC, FH)\n\n"
+        "`!chips` – Chip usage (Wildcard, BB, TC, FH)\n\n"
         "**Help**\n"
-        "`/help` or `!help` – This list"
+        "`!help` – This list"
     )
     embed.set_footer(text="FPL_Suzhou_Seoul tracker")
     return embed
@@ -426,6 +425,21 @@ async def slash_topscore(interaction: discord.Interaction):
         )
         await interaction.followup.send(embed=embed)
 
+@tree.error
+async def on_app_command_error(interaction: discord.Interaction, error: app_commands.AppCommandError):
+    """Always reply so Discord does not show 'application did not respond'."""
+    msg = "Something went wrong with that slash command. Try the `!` version instead (e.g. `!rules`, `!help`)."
+    if isinstance(error, app_commands.CommandNotFound):
+        msg = "That slash command is out of date. Use `!help` for working commands."
+    try:
+        if interaction.response.is_done():
+            await interaction.followup.send(msg, ephemeral=True)
+        else:
+            await interaction.response.send_message(msg, ephemeral=True)
+    except Exception:
+        pass
+    print(f"App command error: {error}")
+
 # ========== PREFIX COMMANDS ==========
 @bot.command(name="help")
 async def prefix_help(ctx):
@@ -541,17 +555,22 @@ async def on_ready():
     print(f"Logged in as {bot.user} (ID: {bot.user.id})")
     for g in bot.guilds:
         print(f"  - {g.name} ({g.id})")
+    # Force clean guild command sync (fixes CommandNotFound / stale slash commands)
     try:
         guild = discord.Object(id=GUILD_ID)
+        tree.clear_commands(guild=guild)
         tree.copy_global_to(guild=guild)
         synced = await tree.sync(guild=guild)
-        print(f"✅ Guild sync: {len(synced)} commands")
+        print(f"✅ Guild sync: {len(synced)} commands → {GUILD_ID}")
+        for c in synced:
+            print(f"   /{c.name}")
     except Exception as e:
-        print(f"Sync error: {e}")
+        print(f"Guild sync error: {e}")
         try:
-            await tree.sync()
-        except Exception:
-            pass
+            synced = await tree.sync()
+            print(f"Global sync fallback: {len(synced)} commands")
+        except Exception as e2:
+            print(f"Global sync failed: {e2}")
     if not check_new_gameweek.is_running():
         check_new_gameweek.start()
 
