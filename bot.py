@@ -33,7 +33,8 @@ CHIP_NAMES = {
 
 intents = discord.Intents.default()
 intents.message_content = True
-bot = commands.Bot(command_prefix="!", intents=intents)
+# help_command=None prevents conflict with our custom !help
+bot = commands.Bot(command_prefix="!", intents=intents, help_command=None)
 tree = bot.tree
 
 def load_data():
@@ -168,7 +169,6 @@ async def get_chips_data(session):
         rows.append((m["name"], status, remaining, used_map))
     return rows
 
-# ========== EMBEDS ==========
 async def make_rules_embed():
     embed = discord.Embed(
         title="💰 FPL_Suzhou_Seoul Prize Rules",
@@ -231,11 +231,7 @@ async def make_highscorers_embed(session):
         return None
     finished = set(await get_finished_gw_ids(session))
     sorted_wins = sorted(wins.items(), key=lambda x: x[1], reverse=True)
-    embed = discord.Embed(
-        title="👑 Weekly High Scorer Leaderboard",
-        color=0xffd700,
-        timestamp=datetime.now(timezone.utc)
-    )
+    embed = discord.Embed(title="👑 Weekly High Scorer Leaderboard", color=0xffd700, timestamp=datetime.now(timezone.utc))
     lines = []
     for i, (name, count) in enumerate(sorted_wins, 1):
         medal = "🥇" if i == 1 else "🥈" if i == 2 else "🥉" if i == 3 else "•"
@@ -257,13 +253,11 @@ async def make_money_embed(session):
     managers = await get_managers(session)
     finished = set(await get_finished_gw_ids(session))
     embed = discord.Embed(title="💵 Current Prize Money Tracker", color=0x00bcd4, timestamp=datetime.now(timezone.utc))
-
     confirmed_wins = defaultdict(int)
     for name, gws in weeks_won.items():
         for g in gws:
             if g in finished:
                 confirmed_wins[name] += 1
-
     weekly_lines = []
     total_confirmed = 0
     for name, count in sorted(wins.items(), key=lambda x: x[1], reverse=True):
@@ -273,9 +267,7 @@ async def make_money_embed(session):
         total_confirmed += yen_conf
         extra = f" (+{prov} live)" if prov else ""
         weekly_lines.append(f"**{name}**: {conf} confirmed = **{yen_conf}¥**{extra}")
-
     embed.add_field(name="Weekly High Scorer Money", value="\n".join(weekly_lines) or "None yet", inline=False)
-
     if managers:
         sorted_m = sorted(managers, key=lambda m: m["total"], reverse=True)
         first = sorted_m[0]["name"] if sorted_m else "—"
@@ -295,7 +287,6 @@ async def make_live_embed(session):
     bootstrap = await get_bootstrap(session)
     ev = next((e for e in bootstrap["events"] if e["id"] == gw), None)
     status = "LIVE" if ev and not ev.get("finished") else "Finished"
-
     embed = discord.Embed(
         title=f"📡 Gameweek {gw} – {status}",
         color=0xe91e63 if status == "LIVE" else 0x00ff87,
@@ -313,11 +304,7 @@ async def make_live_embed(session):
 
 async def make_form_embed(session):
     rows = await get_form_data(session, last_n=5)
-    embed = discord.Embed(
-        title="🔥 Form Table (Last 5 GWs)",
-        color=0xff9800,
-        timestamp=datetime.now(timezone.utc)
-    )
+    embed = discord.Embed(title="🔥 Form Table (Last 5 GWs)", color=0xff9800, timestamp=datetime.now(timezone.utc))
     lines = []
     for i, (name, pts, detail, n) in enumerate(rows, 1):
         medal = "🥇" if i == 1 else "🥈" if i == 2 else "🥉" if i == 3 else f"**{i}.**"
@@ -327,11 +314,7 @@ async def make_form_embed(session):
 
 async def make_chips_embed(session):
     rows = await get_chips_data(session)
-    embed = discord.Embed(
-        title="🎴 Chip Tracker",
-        color=0x3f51b5,
-        timestamp=datetime.now(timezone.utc)
-    )
+    embed = discord.Embed(title="🎴 Chip Tracker", color=0x3f51b5, timestamp=datetime.now(timezone.utc))
     lines = []
     for name, status, remaining, _ in rows:
         used_txt = ", ".join(s for s in status if "✅" not in s) or "None used"
@@ -341,7 +324,6 @@ async def make_chips_embed(session):
     embed.set_footer(text="✅ = still available")
     return embed
 
-# ========== SLASH COMMANDS ==========
 @tree.command(name="help", description="List all bot commands and what they do")
 async def slash_help(interaction: discord.Interaction):
     await interaction.response.send_message(embed=await make_help_embed())
@@ -427,10 +409,9 @@ async def slash_topscore(interaction: discord.Interaction):
 
 @tree.error
 async def on_app_command_error(interaction: discord.Interaction, error: app_commands.AppCommandError):
-    """Always reply so Discord does not show 'application did not respond'."""
-    msg = "Something went wrong with that slash command. Try the `!` version instead (e.g. `!rules`, `!help`)."
+    msg = "Something went wrong. Try `!help` instead."
     if isinstance(error, app_commands.CommandNotFound):
-        msg = "That slash command is out of date. Use `!help` for working commands."
+        msg = "Slash command out of date. Use `!help`."
     try:
         if interaction.response.is_done():
             await interaction.followup.send(msg, ephemeral=True)
@@ -440,7 +421,6 @@ async def on_app_command_error(interaction: discord.Interaction, error: app_comm
         pass
     print(f"App command error: {error}")
 
-# ========== PREFIX COMMANDS ==========
 @bot.command(name="help")
 async def prefix_help(ctx):
     await ctx.send(embed=await make_help_embed())
@@ -514,7 +494,6 @@ async def prefix_topscore(ctx):
         )
         await ctx.send(embed=embed)
 
-# ========== AUTO ANNOUNCEMENT ==========
 @tasks.loop(minutes=30)
 async def check_new_gameweek():
     channel = bot.get_channel(ANNOUNCE_CHANNEL_ID)
@@ -555,7 +534,6 @@ async def on_ready():
     print(f"Logged in as {bot.user} (ID: {bot.user.id})")
     for g in bot.guilds:
         print(f"  - {g.name} ({g.id})")
-    # Force clean guild command sync (fixes CommandNotFound / stale slash commands)
     try:
         guild = discord.Object(id=GUILD_ID)
         tree.clear_commands(guild=guild)
