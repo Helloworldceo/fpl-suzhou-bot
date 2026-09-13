@@ -283,7 +283,6 @@ async def make_money_embed(session):
     for n in weeks_won:
         if n not in names:
             names.append(n)
-
     names.sort(key=lambda n: wins.get(n, 0), reverse=True)
 
     lines = []
@@ -303,9 +302,7 @@ async def make_money_embed(session):
             else:
                 details.append(f"GW{gw}* ({pts} pts) live")
         detail_str = ", ".join(details) if details else "no weekly wins yet"
-        lines.append(
-            f"**{name}** — **{yen_conf}¥**{extra}\n    └ {detail_str}"
-        )
+        lines.append(f"**{name}** — **{yen_conf}¥**{extra}\n    └ {detail_str}")
 
     embed.description = "\n".join(lines) if lines else "No weekly prizes yet."
 
@@ -380,6 +377,30 @@ async def make_chips_embed(session):
         lines.append(f"**{name}** — {remaining}/4 left\n    Used: {used_txt}\n    Left: {left}")
     embed.description = "\n\n".join(lines) if lines else "No data."
     embed.set_footer(text="✅ = still available")
+    return embed
+
+async def make_gw_final_embed(session, gw, scores, high, winners, wins, weeks_won):
+    embed = discord.Embed(
+        title=f"🏁 Gameweek {gw} Final Results",
+        color=0x37003c,
+        timestamp=datetime.now(timezone.utc),
+    )
+    lines = [f"{'🥇 ' if pts == high else ''}**{name}** — **{pts}** pts" for name, player, pts in scores]
+    embed.description = "\n".join(lines)
+    if winners:
+        embed.add_field(
+            name="Weekly High Scorer",
+            value=f"🎉 **{', '.join(winners)}** ({high} pts)\n💰 **+{WEEKLY_PRIZE}¥** each",
+            inline=False,
+        )
+    table_lines = []
+    for n, c in sorted(wins.items(), key=lambda x: -x[1]):
+        details = ", ".join(f"GW{g} ({p})" for g, p in weeks_won.get(n, []))
+        table_lines.append(f"**{n}**: {c} ({c * WEEKLY_PRIZE}¥) — {details}")
+    table = "\n".join(table_lines) or "—"
+    if len(table) > 1000:
+        table = table[:997] + "..."
+    embed.add_field(name="Season High Scorer Count", value=table, inline=False)
     return embed
 
 @tree.command(name="help", description="List all bot commands and what they do")
@@ -561,33 +582,18 @@ async def check_new_gameweek():
     last = data.get("last_announced_gw", 0)
     async with aiohttp.ClientSession() as session:
         finished_gws = await get_finished_gw_ids(session)
-        if not finished_gws:
+        missed = [gw for gw in finished_gws if gw > last]
+        if not missed:
             return
-        latest = finished_gws[-1]
-        if latest > last:
-            scores, high = await get_gw_scores(session, latest)
+        wins, weeks_won, _ = await get_high_scorer_details(session)
+        for gw in missed:
+            scores, high = await get_gw_scores(session, gw)
             winners = [s[0] for s in scores if s[2] == high and high > 0]
-            embed = discord.Embed(title=f"🏁 Gameweek {latest} Final Results", color=0x37003c, timestamp=datetime.now(timezone.utc))
-            lines = [f"{'🥇 ' if pts == high else ''}**{name}** — **{pts}** pts" for name, player, pts in scores]
-            embed.description = "\n".join(lines)
-            if winners:
-                embed.add_field(
-                    name="Weekly High Scorer",
-                    value=f"🎉 **{', '.join(winners)}** ({high} pts)\n💰 **+{WEEKLY_PRIZE}¥** each",
-                    inline=False
-                )
-            wins, weeks_won, _ = await get_high_scorer_details(session)
-            table_lines = []
-            for n, c in sorted(wins.items(), key=lambda x: -x[1]):
-                details = ", ".join(f"GW{gw} ({pts})" for gw, pts in weeks_won.get(n, []))
-                table_lines.append(f"**{n}**: {c} ({c * WEEKLY_PRIZE}¥) — {details}")
-            table = "\n".join(table_lines) or "—"
-            if len(table) > 1000:
-                table = table[:997] + "..."
-            embed.add_field(name="Season High Scorer Count", value=table, inline=False)
+            embed = await make_gw_final_embed(session, gw, scores, high, winners, wins, weeks_won)
             await channel.send(embed=embed)
-            data["last_announced_gw"] = latest
+            data["last_announced_gw"] = gw
             save_data(data)
+            print(f"Announced GW{gw}")
 
 @check_new_gameweek.before_loop
 async def before_check():
