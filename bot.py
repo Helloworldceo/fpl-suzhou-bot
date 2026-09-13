@@ -101,12 +101,6 @@ async def get_gw_scores(session, gw: int):
     return scores, high
 
 async def get_high_scorer_details(session):
-    """
-    Returns:
-      wins: name -> win count
-      weeks_won: name -> list of (gw, points) for each win
-      week_winners: list of (gw, [names], high_pts)
-    """
     managers = await get_managers(session)
     all_hist = {}
     for m in managers:
@@ -122,7 +116,7 @@ async def get_high_scorer_details(session):
             max_gw = max(max_gw, max(h.keys()))
 
     wins = defaultdict(int)
-    weeks_won = defaultdict(list)  # name -> [(gw, pts), ...]
+    weeks_won = defaultdict(list)
     week_winners = []
 
     for gw in range(1, max_gw + 1):
@@ -201,17 +195,17 @@ async def make_help_embed():
     embed.description = (
         "Use `!` commands (most reliable) or `/` slash commands.\n\n"
         "**League & scores**\n"
-        "`!standings` – Current league table\n"
-        "`!gw [n]` – Scores for a gameweek (default = current)\n"
+        "`!standings` / `/standings` – League table (points only)\n"
+        "`!gw [n]` – Scores for a gameweek\n"
         "`!live` – Live scores for the current gameweek\n"
         "`!form` – Form table (last 5 gameweeks)\n\n"
-        "**High scorers & money**\n"
-        "`!highscorers` – Who won which weeks + points + ¥\n"
-        "`!money` – Prize money (confirmed vs live)\n"
+        "**Prizes**\n"
+        "`!money` / `/money` – Prize money + which GWs each manager won\n"
+        "`!highscorers` – Weekly high scorer count\n"
         "`!topscore` – Highest single GW score\n"
         "`!rules` – Prize pot rules (1000¥)\n\n"
         "**Team info**\n"
-        "`!chips` – Chip usage (Wildcard, BB, TC, FH)\n\n"
+        "`!chips` – Chip usage\n\n"
         "**Help**\n"
         "`!help` – This list"
     )
@@ -222,12 +216,20 @@ async def make_standings_embed(session):
     data = await get_league_standings(session)
     league_name = data["league"]["name"]
     results = data["standings"]["results"]
-    embed = discord.Embed(title=f"🏆 {league_name}", color=0x37003c, timestamp=datetime.now(timezone.utc))
+    embed = discord.Embed(
+        title=f"🏆 {league_name} – Standings",
+        color=0x37003c,
+        timestamp=datetime.now(timezone.utc)
+    )
     lines = []
     for r in results:
         medal = "🥇" if r["rank"] == 1 else "🥈" if r["rank"] == 2 else "🥉" if r["rank"] == 3 else f"**{r['rank']}.**"
-        lines.append(f"{medal} {r['entry_name']} ({r['player_name']}) — **{r['total']}** pts  |  GW: {r['event_total']}")
+        lines.append(
+            f"{medal} {r['entry_name']} ({r['player_name']}) — "
+            f"**{r['total']}** pts  |  GW: {r['event_total']}"
+        )
     embed.description = "\n".join(lines)
+    embed.set_footer(text="Points only. Use /money for prizes and GW wins.")
     return embed
 
 async def make_highscorers_embed(session):
@@ -245,7 +247,6 @@ async def make_highscorers_embed(session):
     for i, (name, count) in enumerate(sorted_wins, 1):
         medal = "🥇" if i == 1 else "🥈" if i == 2 else "🥉" if i == 3 else "•"
         money = count * WEEKLY_PRIZE
-        # e.g. GW1 (66 pts), GW2* (31 pts)
         details = []
         for gw, pts in weeks_won.get(name, []):
             tag = f"GW{gw}" if gw in finished else f"GW{gw}*"
@@ -261,45 +262,81 @@ async def make_highscorers_embed(session):
         for gw, w, pts in week_winners:
             live = " *(live)*" if gw not in finished else ""
             history.append(f"**GW{gw}**{live}: {', '.join(w)} ({pts} pts)")
-        # Discord field value max 1024 chars
         history_text = "\n".join(history)
         if len(history_text) > 1000:
             history_text = history_text[:997] + "..."
         embed.add_field(name="Week-by-week winners", value=history_text, inline=False)
-    embed.set_footer(text="* = live / not finished yet")
+    embed.set_footer(text="* = live / not finished yet  ·  Use /money for prize totals")
     return embed
 
 async def make_money_embed(session):
-    wins, weeks_won, _ = await get_high_scorer_details(session)
+    wins, weeks_won, week_winners = await get_high_scorer_details(session)
     managers = await get_managers(session)
     finished = set(await get_finished_gw_ids(session))
-    embed = discord.Embed(title="💵 Current Prize Money Tracker", color=0x00bcd4, timestamp=datetime.now(timezone.utc))
-    confirmed_wins = defaultdict(int)
-    for name, pairs in weeks_won.items():
-        for gw, _pts in pairs:
-            if gw in finished:
-                confirmed_wins[name] += 1
-    weekly_lines = []
+    embed = discord.Embed(
+        title="💵 Prize Money Tracker",
+        color=0x00bcd4,
+        timestamp=datetime.now(timezone.utc)
+    )
+
+    names = [m["name"] for m in managers]
+    for n in weeks_won:
+        if n not in names:
+            names.append(n)
+
+    names.sort(key=lambda n: wins.get(n, 0), reverse=True)
+
+    lines = []
     total_confirmed = 0
-    for name, count in sorted(wins.items(), key=lambda x: x[1], reverse=True):
-        conf = confirmed_wins.get(name, 0)
-        prov = count - conf
+    for name in names:
+        pairs = weeks_won.get(name, [])
+        conf = sum(1 for gw, _pts in pairs if gw in finished)
+        prov = len(pairs) - conf
         yen_conf = conf * WEEKLY_PRIZE
+        yen_live = prov * WEEKLY_PRIZE
         total_confirmed += yen_conf
-        extra = f" (+{prov} live)" if prov else ""
-        weekly_lines.append(f"**{name}**: {conf} confirmed = **{yen_conf}¥**{extra}")
-    embed.add_field(name="Weekly High Scorer Money", value="\n".join(weekly_lines) or "None yet", inline=False)
+        extra = f" + **{yen_live}¥** live" if prov else ""
+        details = []
+        for gw, pts in pairs:
+            if gw in finished:
+                details.append(f"GW{gw} ({pts} pts) = {WEEKLY_PRIZE}¥")
+            else:
+                details.append(f"GW{gw}* ({pts} pts) live")
+        detail_str = ", ".join(details) if details else "no weekly wins yet"
+        lines.append(
+            f"**{name}** — **{yen_conf}¥**{extra}\n    └ {detail_str}"
+        )
+
+    embed.description = "\n".join(lines) if lines else "No weekly prizes yet."
+
+    if week_winners:
+        history = []
+        for gw, w, pts in week_winners:
+            live = " *(live)*" if gw not in finished else ""
+            history.append(f"**GW{gw}**{live}: {', '.join(w)} ({pts} pts)")
+        history_text = "\n".join(history)
+        if len(history_text) > 1000:
+            history_text = history_text[:997] + "..."
+        embed.add_field(name="Who won which GW", value=history_text, inline=False)
+
     if managers:
         sorted_m = sorted(managers, key=lambda m: m["total"], reverse=True)
         first = sorted_m[0]["name"] if sorted_m else "—"
         second = sorted_m[1]["name"] if len(sorted_m) > 1 else "—"
         embed.add_field(
             name="Projected Season Prizes",
-            value=f"🥇 1st ({SEASON_1ST}¥): **{first}**\n🥈 2nd ({SEASON_2ND}¥): **{second}**\n🏆 Cup ({CUP_WINNER}¥): *TBD*",
-            inline=False
+            value=(
+                f"🥇 1st ({SEASON_1ST}¥): **{first}**\n"
+                f"🥈 2nd ({SEASON_2ND}¥): **{second}**\n"
+                f"🏆 Cup ({CUP_WINNER}¥): *TBD*"
+            ),
+            inline=False,
         )
+
     remaining = (38 * WEEKLY_PRIZE) - total_confirmed
-    embed.set_footer(text=f"Confirmed weekly paid: {total_confirmed}¥ | Remaining weekly pot: ~{remaining}¥")
+    embed.set_footer(
+        text=f"Confirmed weekly: {total_confirmed}¥ | Remaining weekly pot: ~{remaining}¥ | * = live"
+    )
     return embed
 
 async def make_live_embed(session):
@@ -353,7 +390,7 @@ async def slash_help(interaction: discord.Interaction):
 async def slash_rules(interaction: discord.Interaction):
     await interaction.response.send_message(embed=await make_rules_embed())
 
-@tree.command(name="standings", description="Current league standings")
+@tree.command(name="standings", description="League table (points only)")
 async def slash_standings(interaction: discord.Interaction):
     await interaction.response.defer()
     async with aiohttp.ClientSession() as session:
@@ -393,14 +430,14 @@ async def slash_chips(interaction: discord.Interaction):
     async with aiohttp.ClientSession() as session:
         await interaction.followup.send(embed=await make_chips_embed(session))
 
-@tree.command(name="highscorers", description="Weekly high scorers + which GWs + points + money")
+@tree.command(name="highscorers", description="Weekly high scorers + which GWs + points")
 async def slash_highscorers(interaction: discord.Interaction):
     await interaction.response.defer()
     async with aiohttp.ClientSession() as session:
         embed = await make_highscorers_embed(session)
         await interaction.followup.send(embed=embed if embed else "No data yet.")
 
-@tree.command(name="money", description="Prize money tracker")
+@tree.command(name="money", description="Prize money + which GWs each manager won")
 async def slash_money(interaction: discord.Interaction):
     await interaction.response.defer()
     async with aiohttp.ClientSession() as session:
@@ -432,7 +469,7 @@ async def slash_topscore(interaction: discord.Interaction):
 async def on_app_command_error(interaction: discord.Interaction, error: app_commands.AppCommandError):
     msg = "Something went wrong. Try `!help` instead."
     if isinstance(error, app_commands.CommandNotFound):
-        msg = "Slash command out of date. Use `!help`."
+        msg = "Slash command out of date. Use `!money` or `!help`."
     try:
         if interaction.response.is_done():
             await interaction.followup.send(msg, ephemeral=True)
