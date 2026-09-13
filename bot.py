@@ -33,7 +33,6 @@ CHIP_NAMES = {
 
 intents = discord.Intents.default()
 intents.message_content = True
-# help_command=None prevents conflict with our custom !help
 bot = commands.Bot(command_prefix="!", intents=intents, help_command=None)
 tree = bot.tree
 
@@ -102,6 +101,12 @@ async def get_gw_scores(session, gw: int):
     return scores, high
 
 async def get_high_scorer_details(session):
+    """
+    Returns:
+      wins: name -> win count
+      weeks_won: name -> list of (gw, points) for each win
+      week_winners: list of (gw, [names], high_pts)
+    """
     managers = await get_managers(session)
     all_hist = {}
     for m in managers:
@@ -117,7 +122,7 @@ async def get_high_scorer_details(session):
             max_gw = max(max_gw, max(h.keys()))
 
     wins = defaultdict(int)
-    weeks_won = defaultdict(list)
+    weeks_won = defaultdict(list)  # name -> [(gw, pts), ...]
     week_winners = []
 
     for gw in range(1, max_gw + 1):
@@ -130,7 +135,7 @@ async def get_high_scorer_details(session):
         winners = [name for name, pts in gw_scores if pts == high]
         for name in winners:
             wins[name] += 1
-            weeks_won[name].append(gw)
+            weeks_won[name].append((gw, high))
         week_winners.append((gw, winners, high))
 
     return dict(wins), dict(weeks_won), week_winners
@@ -201,7 +206,7 @@ async def make_help_embed():
         "`!live` – Live scores for the current gameweek\n"
         "`!form` – Form table (last 5 gameweeks)\n\n"
         "**High scorers & money**\n"
-        "`!highscorers` – Who won which weeks + count + ¥\n"
+        "`!highscorers` – Who won which weeks + points + ¥\n"
         "`!money` – Prize money (confirmed vs live)\n"
         "`!topscore` – Highest single GW score\n"
         "`!rules` – Prize pot rules (1000¥)\n\n"
@@ -231,20 +236,36 @@ async def make_highscorers_embed(session):
         return None
     finished = set(await get_finished_gw_ids(session))
     sorted_wins = sorted(wins.items(), key=lambda x: x[1], reverse=True)
-    embed = discord.Embed(title="👑 Weekly High Scorer Leaderboard", color=0xffd700, timestamp=datetime.now(timezone.utc))
+    embed = discord.Embed(
+        title="👑 Weekly High Scorer Leaderboard",
+        color=0xffd700,
+        timestamp=datetime.now(timezone.utc)
+    )
     lines = []
     for i, (name, count) in enumerate(sorted_wins, 1):
         medal = "🥇" if i == 1 else "🥈" if i == 2 else "🥉" if i == 3 else "•"
         money = count * WEEKLY_PRIZE
-        gws = [f"GW{g}" if g in finished else f"GW{g}*" for g in weeks_won.get(name, [])]
-        lines.append(f"{medal} **{name}** — **{count}** win{'s' if count != 1 else ''} ({money}¥)\n    └ Weeks: {', '.join(gws)}")
+        # e.g. GW1 (66 pts), GW2* (31 pts)
+        details = []
+        for gw, pts in weeks_won.get(name, []):
+            tag = f"GW{gw}" if gw in finished else f"GW{gw}*"
+            details.append(f"{tag} ({pts} pts)")
+        detail_str = ", ".join(details) if details else "—"
+        lines.append(
+            f"{medal} **{name}** — **{count}** win{'s' if count != 1 else ''} ({money}¥)\n"
+            f"    └ {detail_str}"
+        )
     embed.description = "\n".join(lines)
     if week_winners:
         history = []
         for gw, w, pts in week_winners:
             live = " *(live)*" if gw not in finished else ""
             history.append(f"**GW{gw}**{live}: {', '.join(w)} ({pts} pts)")
-        embed.add_field(name="Week-by-week winners", value="\n".join(history), inline=False)
+        # Discord field value max 1024 chars
+        history_text = "\n".join(history)
+        if len(history_text) > 1000:
+            history_text = history_text[:997] + "..."
+        embed.add_field(name="Week-by-week winners", value=history_text, inline=False)
     embed.set_footer(text="* = live / not finished yet")
     return embed
 
@@ -254,9 +275,9 @@ async def make_money_embed(session):
     finished = set(await get_finished_gw_ids(session))
     embed = discord.Embed(title="💵 Current Prize Money Tracker", color=0x00bcd4, timestamp=datetime.now(timezone.utc))
     confirmed_wins = defaultdict(int)
-    for name, gws in weeks_won.items():
-        for g in gws:
-            if g in finished:
+    for name, pairs in weeks_won.items():
+        for gw, _pts in pairs:
+            if gw in finished:
                 confirmed_wins[name] += 1
     weekly_lines = []
     total_confirmed = 0
@@ -372,7 +393,7 @@ async def slash_chips(interaction: discord.Interaction):
     async with aiohttp.ClientSession() as session:
         await interaction.followup.send(embed=await make_chips_embed(session))
 
-@tree.command(name="highscorers", description="Weekly high scorers + money (includes live)")
+@tree.command(name="highscorers", description="Weekly high scorers + which GWs + points + money")
 async def slash_highscorers(interaction: discord.Interaction):
     await interaction.response.defer()
     async with aiohttp.ClientSession() as session:
@@ -518,9 +539,15 @@ async def check_new_gameweek():
                     value=f"🎉 **{', '.join(winners)}** ({high} pts)\n💰 **+{WEEKLY_PRIZE}¥** each",
                     inline=False
                 )
-            wins, _, _ = await get_high_scorer_details(session)
-            table = "\n".join(f"**{n}**: {c} ({c * WEEKLY_PRIZE}¥)" for n, c in sorted(wins.items(), key=lambda x: -x[1]))
-            embed.add_field(name="Season High Scorer Count", value=table or "—", inline=False)
+            wins, weeks_won, _ = await get_high_scorer_details(session)
+            table_lines = []
+            for n, c in sorted(wins.items(), key=lambda x: -x[1]):
+                details = ", ".join(f"GW{gw} ({pts})" for gw, pts in weeks_won.get(n, []))
+                table_lines.append(f"**{n}**: {c} ({c * WEEKLY_PRIZE}¥) — {details}")
+            table = "\n".join(table_lines) or "—"
+            if len(table) > 1000:
+                table = table[:997] + "..."
+            embed.add_field(name="Season High Scorer Count", value=table, inline=False)
             await channel.send(embed=embed)
             data["last_announced_gw"] = latest
             save_data(data)
